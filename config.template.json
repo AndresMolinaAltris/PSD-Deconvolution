@@ -1,0 +1,5 @@
+{
+  "data_dir": "/path/to/your/data",
+  "output_dir": ".",
+  "output_filename": "results.xlsx"
+}

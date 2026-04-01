@@ -1,0 +1,23 @@
+# Local configuration (contains private paths — copy config.template.json to config.json)
+config.json
+
+# Generated output
+*.xlsx
+*.csv
+
+# Data folders
+Data_Test/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude internal
+../.claude/
