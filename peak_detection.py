@@ -3,14 +3,24 @@ from scipy.signal import find_peaks
 import pandas as pd
 from scipy.interpolate import interp1d
 
-def detect_peaks(data_df, fitting_param):
+def detect_peaks(data_df, fitting_param,
+                 prominence=0.001, distance=5,
+                 height=None, width=None, threshold=None):
     """
     Detect peaks in the particle size distribution to determine modality.
-    
+
     Parameters:
     - data_df: Preprocessed DataFrame.
     - fitting_param: Column name for the fitting parameter.
-    
+    - prominence: Required prominence of peaks (passed to scipy.signal.find_peaks).
+      Lower it to capture small/low-amplitude peaks (default: 0.001).
+    - distance: Required minimal horizontal distance (in samples) between peaks.
+      Lower it to resolve peaks that sit close together (default: 5).
+    - height: Optional required peak height (default: None = no height filter).
+    - width: Optional required peak width in samples (default: None = no width filter).
+    - threshold: Optional required vertical distance to neighbouring samples
+      (default: None = no threshold filter).
+
     Returns:
     - diameters: Array of particle diameters.
     - diff_param: Normalized differential distribution.
@@ -21,7 +31,8 @@ def detect_peaks(data_df, fitting_param):
     diameters = data_df['Particle diameter  [µm]'].values
     diff_param = data_df[fitting_param].values
     diff_param = diff_param / np.trapezoid(diff_param, diameters)
-    peaks, _ = find_peaks(diff_param, prominence=0.001, distance=5)
+    peaks, _ = find_peaks(diff_param, prominence=prominence, distance=distance,
+                          height=height, width=width, threshold=threshold)
     num_modes = len(peaks)
     peak_sizes = diameters[peaks]
     return diameters, diff_param, num_modes, peak_sizes
@@ -101,21 +112,30 @@ def prepare_distribution_data_interpolation(data_df, fitting_param, interp_point
     
     return diameters, diff_param
 
-def find_distribution_peaks(diameters, diff_param):
+def find_distribution_peaks(diameters, diff_param,
+                            prominence=0.001, distance=20,
+                            height=None, width=None, threshold=None):
     """
     Detect peaks in the normalized particle size distribution to determine modality.
-    
+
     Parameters:
     - diameters: Array of particle diameters.
     - diff_param: Normalized differential distribution.
-    
+    - prominence: Required prominence of peaks (passed to scipy.signal.find_peaks).
+      Lower it to capture small/low-amplitude peaks (default: 0.001).
+    - distance: Required minimal horizontal distance (in samples) between peaks.
+      Lower it to resolve peaks that sit close together (default: 20).
+    - height: Optional required peak height (default: None = no height filter).
+    - width: Optional required peak width in samples (default: None = no width filter).
+    - threshold: Optional required vertical distance to neighbouring samples
+      (default: None = no threshold filter).
+
     Returns:
-    - diameters: Array of particle diameters (passed through).
-    - diff_param: Normalized differential distribution (passed through).
     - num_modes: Number of detected peaks (modes).
     - peak_sizes: Diameters at peak locations.
     """
-    peaks, _ = find_peaks(diff_param, prominence=0.001, distance=20)
+    peaks, _ = find_peaks(diff_param, prominence=prominence, distance=distance,
+                          height=height, width=width, threshold=threshold)
     num_modes = len(peaks)
     peak_sizes = diameters[peaks]
     return num_modes, peak_sizes

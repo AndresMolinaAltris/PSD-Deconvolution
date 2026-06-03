@@ -110,6 +110,50 @@ python main.py --help
    - `results.xlsx` (in `output_dir`): summary table with D10/D50/D90 and per-mode statistics for all files
    - Plot windows: fitted distribution and individual modes for each file
 
+## Catching small peaks (peak-detection thresholds)
+
+Modality is decided by `scipy.signal.find_peaks`. By default it uses conservative
+thresholds, so a small / low-amplitude population can be filtered out and the data gets
+fit with too few modes. Both peak-detection functions in `peak_detection.py` now accept
+optional keyword arguments to override these thresholds. **The defaults reproduce the
+previous behaviour exactly**, so existing calls are unaffected.
+
+| Argument | `detect_peaks` default | `find_distribution_peaks` default | Effect |
+|----------|------------------------|-----------------------------------|--------|
+| `prominence` | `0.001` | `0.001` | Lower it to capture small peaks |
+| `distance` | `5` | `20` | Lower it to resolve peaks close together |
+| `height` | `None` | `None` | Optional minimum peak height |
+| `width` | `None` | `None` | Optional minimum peak width (samples) |
+| `threshold` | `None` | `None` | Optional vertical distance to neighbours |
+
+```python
+from data_processing import load_data
+from peak_detection import detect_peaks, prepare_distribution_data_interpolation, find_distribution_peaks
+
+param = 'Size distribution Volume weighted [%]'
+df = load_data('Data_Test/UKP240701 QC Rep1.xlsx', preprocess=True, param_fit=param, min_diameter=0.5)
+
+# Default behaviour — unchanged
+diameters, diff, num_modes, peak_sizes = detect_peaks(df, param)
+# -> num_modes: 1, peak_sizes: [22.]
+
+# Lowered thresholds — now catches the small ~2.8 µm peak
+diameters, diff, num_modes, peak_sizes = detect_peaks(df, param, prominence=1e-4, distance=2)
+# -> num_modes: 2, peak_sizes: [2.8, 22.]
+
+# Same options on the interpolated path used by main.py
+diameters, y = prepare_distribution_data_interpolation(df, param)
+num_modes, peak_sizes = find_distribution_peaks(diameters, y, prominence=1e-4, distance=2)
+```
+
+To use lowered thresholds in the full pipeline, pass the same kwargs to the
+`find_distribution_peaks(...)` call in `main.py`. You can verify thresholds against the
+bundled samples with:
+
+```bash
+python test_peak_detection.py
+```
+
 ## Expected Excel format
 
 The tool reads files exported from Malvern Mastersizer or equivalent instruments. Each `.xlsx` file must have:
@@ -139,5 +183,6 @@ data_processing.py       # File loading and basic statistics
 peak_detection.py        # Peak detection and data interpolation
 fitting.py               # Lognormal distribution fitting
 visualization.py         # Plotting
+test_peak_detection.py   # Verifies peak-detection thresholds against Data_Test samples
 requirements.txt         # Python dependencies
 ```
