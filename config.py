@@ -24,17 +24,18 @@ PARAM_FIT = 1
 # These back the optional command-line arguments in main.py. Omitting a CLI
 # argument falls back to the value here.
 #
-# The defaults are tuned to resolve the small (~2-5 µm) secondary mode that is
-# present in the volume-weighted data in a robust way:
+# The fit is a sum of Gaussians in log-diameter (see fitting.py), run on the
+# raw instrument bins. Peak detection only *seeds* the fit; the number of modes
+# is set explicitly with --num_modes when the default detection is not wanted.
 #   * PEAK_REL_PROMINENCE is RELATIVE (a fraction of the distribution's peak
-#     height), so the threshold adapts to each file. ~0.1% catches the small
-#     real modes while rejecting the tiny large-diameter interpolation artefacts.
-#   * WEIGHTING_SCHEME = 'none' (unweighted). 'proportional_to_y' weights points
-#     by their height and therefore suppresses the low-amplitude small mode; an
-#     unweighted fit gives every point equal say and resolves it (and yields
-#     equal-or-better R² on the bundled samples).
+#     height), so the threshold adapts per file. ~2% catches genuine secondary
+#     modes on the raw bins while ignoring bin-to-bin noise. A small mode that
+#     is only a shoulder has no local maximum: force it with --num_modes.
+#   * WEIGHTING_SCHEME = 'none' (unweighted). In log-space an unweighted fit
+#     gives every decade equal say; 'sqrt_y' can emphasise low-amplitude modes.
 MIN_DIAMETER        = 0.5     # lower particle-diameter cutoff [µm]
-PEAK_REL_PROMINENCE = 0.001   # find_peaks prominence as a fraction of peak height
-PEAK_DISTANCE       = 20      # find_peaks min separation (samples)
+PEAK_REL_PROMINENCE = 0.02    # peak prominence as a fraction of peak height (raw bins)
+PEAK_DISTANCE       = 2       # peak min separation (bins)
 WEIGHTING_SCHEME    = 'none'  # 'proportional_to_y' | 'sqrt_y' | 'none' (unweighted)
-INTERP_POINTS       = 1000    # interpolation grid size
+DEFAULT_SIGMA       = 0.35    # initial Gaussian width (log-space) per mode
+MC_SAMPLES          = 300     # Monte-Carlo draws for D-value uncertainty (0 disables)

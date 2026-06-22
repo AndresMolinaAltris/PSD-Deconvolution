@@ -1,130 +1,48 @@
+"""
+Distribution preparation and mode seeding.
+
+The fit now runs directly on the raw instrument bins (no cubic interpolation:
+splines overshoot in the near-zero tail and invent spurious modes that the fit
+then chases to absurd diameters). Peaks are detected in log-diameter space,
+which is where the modes are symmetric and evenly sampled, and serve only as
+*seeds* for the fit — the number of modes is set explicitly by the operator.
+"""
 import numpy as np
-from scipy.signal import find_peaks
 import pandas as pd
-from scipy.interpolate import interp1d
+from scipy.signal import find_peaks
 
-def detect_peaks(data_df, fitting_param,
-                 prominence=0.001, distance=5,
-                 height=None, width=None, threshold=None):
+DIAMETER_COL = "Particle diameter  [µm]"
+
+
+def psd_arrays(df, param):
+    """Return clean, sorted (diameter, differential) arrays from a loaded frame."""
+    d = pd.to_numeric(df[DIAMETER_COL], errors="coerce").to_numpy(dtype=float)
+    y = pd.to_numeric(df[param], errors="coerce").to_numpy(dtype=float)
+    mask = np.isfinite(d) & np.isfinite(y) & (d > 0)
+    d, y = d[mask], y[mask]
+    order = np.argsort(d)
+    return d[order], y[order]
+
+
+def detect_peaks(d, y, prominence_rel=0.02, distance=2):
     """
-    Detect peaks in the particle size distribution to determine modality.
+    Detect peak diameters in log-diameter space.
 
-    Parameters:
-    - data_df: Preprocessed DataFrame.
-    - fitting_param: Column name for the fitting parameter.
-    - prominence: Required prominence of peaks (passed to scipy.signal.find_peaks).
-      Lower it to capture small/low-amplitude peaks (default: 0.001).
-    - distance: Required minimal horizontal distance (in samples) between peaks.
-      Lower it to resolve peaks that sit close together (default: 5).
-    - height: Optional required peak height (default: None = no height filter).
-    - width: Optional required peak width in samples (default: None = no width filter).
-    - threshold: Optional required vertical distance to neighbouring samples
-      (default: None = no threshold filter).
+    Parameters
+    ----------
+    d, y : array         diameter and differential weight (raw bins).
+    prominence_rel : float  required peak prominence as a fraction of the peak
+                            height (relative, so it adapts per file). Lower it
+                            to catch smaller modes; raise it to ignore bumps.
+    distance : int       minimum separation between peaks, in bins.
 
-    Returns:
-    - diameters: Array of particle diameters.
-    - diff_param: Normalized differential distribution.
-    - num_modes: Number of detected peaks (modes).
-    - peak_sizes: Diameters at peak locations.
+    Returns the diameters at detected peaks (always at least one — the global
+    maximum — so a seed is guaranteed).
     """
-    data_df['Particle diameter  [µm]'] = pd.to_numeric(data_df['Particle diameter  [µm]'], errors='coerce')
-    diameters = data_df['Particle diameter  [µm]'].values
-    diff_param = data_df[fitting_param].values
-    diff_param = diff_param / np.trapezoid(diff_param, diameters)
-    peaks, _ = find_peaks(diff_param, prominence=prominence, distance=distance,
-                          height=height, width=width, threshold=threshold)
-    num_modes = len(peaks)
-    peak_sizes = diameters[peaks]
-    return diameters, diff_param, num_modes, peak_sizes
-
-def prepare_distribution_data(data_df, fitting_param):
-    """
-    Prepare and normalize the particle size distribution data.
-    
-    Parameters:
-    - data_df: Preprocessed DataFrame.
-    - fitting_param: Column name for the fitting parameter.
-    
-    Returns:
-    - diameters: Array of particle diameters.
-    - diff_param: Normalized differential distribution.
-    """
-    data_df['Particle diameter  [µm]'] = pd.to_numeric(data_df['Particle diameter  [µm]'], errors='coerce')
-    diameters = data_df['Particle diameter  [µm]'].values
-    diff_param = data_df[fitting_param].values
-    diff_param = diff_param / np.trapezoid(diff_param, diameters)
-    return diameters, diff_param
-
-def prepare_distribution_data_interpolation(data_df, fitting_param, interp_points=1000):
-    """
-    Prepare and normalize the particle size distribution data with interpolation.
-    
-    Parameters:
-    - data_df: Preprocessed DataFrame.
-    - fitting_param: Column name for the fitting parameter.
-    - interp_points: Number of points for the interpolated grid (default: 1000).
-    
-    Returns:
-    - diameters: Array of interpolated particle diameters.
-    - diff_param: Normalized interpolated differential distribution.
-    """
-    data_df['Particle diameter  [µm]'] = pd.to_numeric(data_df['Particle diameter  [µm]'], errors='coerce')
-    original_diameters = data_df['Particle diameter  [µm]'].values
-    original_diff_param = data_df[fitting_param].values
-    
-    # Sort by diameters to ensure ascending order
-    sort_idx = np.argsort(original_diameters)
-    original_diameters = original_diameters[sort_idx]
-    original_diff_param = original_diff_param[sort_idx]
-    
-    # Create a log-spaced interpolated grid to match typical particle size scaling
-    if len(original_diameters) < 2:
-        raise ValueError("Insufficient data points for interpolation.")
-    min_d = np.min(original_diameters)
-    max_d = np.max(original_diameters)
-    if min_d <= 0:
-        raise ValueError("Diameters must be positive for log-spacing.")
-    diameters = np.logspace(np.log10(min_d), np.log10(max_d), interp_points)
-    
-    # Interpolate using cubic interpolation for smoother results (change to 'linear' if preferred)
-    interpolator = interp1d(original_diameters, original_diff_param, kind='cubic', fill_value=0, bounds_error=False)
-    diff_param = interpolator(diameters)
-
-    # Ensure non-negative values
-    diff_param = np.maximum(diff_param, 0)
-    
-    # Normalize the interpolated distribution
-    integral = np.trapezoid(diff_param, diameters)
-    if integral == 0:
-        raise ValueError("Interpolated distribution integrates to zero.")
-    diff_param = diff_param / integral
-
-    return diameters, diff_param
-
-def find_distribution_peaks(diameters, diff_param,
-                            prominence=0.001, distance=20,
-                            height=None, width=None, threshold=None):
-    """
-    Detect peaks in the normalized particle size distribution to determine modality.
-
-    Parameters:
-    - diameters: Array of particle diameters.
-    - diff_param: Normalized differential distribution.
-    - prominence: Required prominence of peaks (passed to scipy.signal.find_peaks).
-      Lower it to capture small/low-amplitude peaks (default: 0.001).
-    - distance: Required minimal horizontal distance (in samples) between peaks.
-      Lower it to resolve peaks that sit close together (default: 20).
-    - height: Optional required peak height (default: None = no height filter).
-    - width: Optional required peak width in samples (default: None = no width filter).
-    - threshold: Optional required vertical distance to neighbouring samples
-      (default: None = no threshold filter).
-
-    Returns:
-    - num_modes: Number of detected peaks (modes).
-    - peak_sizes: Diameters at peak locations.
-    """
-    peaks, _ = find_peaks(diff_param, prominence=prominence, distance=distance,
-                          height=height, width=width, threshold=threshold)
-    num_modes = len(peaks)
-    peak_sizes = diameters[peaks]
-    return num_modes, peak_sizes
+    if y.max() <= 0:
+        return np.array([d[len(d) // 2]])
+    y_rel = y / y.max()
+    idx, _ = find_peaks(y_rel, prominence=prominence_rel, distance=distance)
+    if len(idx) == 0:
+        idx = np.array([int(np.argmax(y_rel))])
+    return d[idx]

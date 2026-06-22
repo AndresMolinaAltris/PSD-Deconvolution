@@ -1,336 +1,224 @@
+"""
+PSD fitting core — sum of Gaussians in log-diameter.
+
+A particle-size mode is lognormal in diameter d, i.e. a *Gaussian* in the
+natural coordinate u = ln(d). Fitting in u (rather than fitting lognorm.pdf in
+linear d on a log grid) keeps the model well-conditioned, makes the residual
+weighting uniform across the decades you actually plot, and makes every mode
+statistic analytic:
+
+    median   D50_i = exp(mu_i)
+    quantile D_p_i = exp(mu_i + sigma_i * z_p),   z_p = Phi^-1(p/100)
+    mean         = exp(mu_i + sigma_i**2 / 2)        (arithmetic, linear d)
+
+Because d is exponential in the parameters, dD/D = dmu + z_p*dsigma: a small
+*absolute* error in log-space is a constant *relative* error in diameter. We
+therefore capture the fit covariance and report every diameter with a
+propagated uncertainty instead of hiding it behind extra digits.
+
+The model fits N independent, non-negative Gaussian amplitudes (no 1-w1
+simplex, no max(0, .) kinks) so a single code path covers any number of modes.
+"""
 import numpy as np
-from scipy.stats import lognorm
 from scipy.optimize import curve_fit
-from scipy.integrate import cumulative_trapezoid
-import pandas as pd
+from scipy.special import ndtri, erf  # inverse normal CDF, error function
+
+SQRT_2PI = np.sqrt(2.0 * np.pi)
 
 
-def monomodal_lognorm(x, mu1, sigma1):
-    """
-    Monomodal lognormal distribution (1 mode).
-    Parameters: mu1 (log-mean), sigma1 (shape parameter).
-    Weight is implicitly 1.0.
-    """
-    result = lognorm.pdf(x, s=sigma1, loc=0, scale=np.exp(mu1))
-    return result
-
-def bimodal_lognorm(x, w1, mu1, sigma1, mu2, sigma2):
-    """
-    Bimodal lognormal distribution (2 modes).
-    Parameters: w1 (weight of first component), mu1, sigma1, mu2, sigma2.
-    Weight w2 is computed as 1 - w1.
-    """
-    weights = [max(0, w1), max(0, 1.0 - w1)]
-    weight_sum = sum(weights)
-    if weight_sum == 0:
-        return np.zeros_like(x, dtype=float)
-    weights = [w / weight_sum for w in weights]
-    result = (weights[0] * lognorm.pdf(x, s=sigma1, loc=0, scale=np.exp(mu1)) +
-              weights[1] * lognorm.pdf(x, s=sigma2, loc=0, scale=np.exp(mu2)))
-    return result
-
-def trimodal_lognorm(x, w1, w2, mu1, sigma1, mu2, sigma2, mu3, sigma3):
-    """
-    Trimodal lognormal distribution (3 modes).
-    Parameters: w1, w2 (weights of first two components), mu1, sigma1, mu2, sigma2, mu3, sigma3.
-    Weight w3 is computed as 1 - (w1 + w2).
-    """
-    weights = [max(0, w1), max(0, w2), max(0, 1.0 - (w1 + w2))]
-    weight_sum = sum(weights)
-    if weight_sum == 0:
-        return np.zeros_like(x, dtype=float)
-    weights = [w / weight_sum for w in weights]
-    result = (weights[0] * lognorm.pdf(x, s=sigma1, loc=0, scale=np.exp(mu1)) +
-              weights[1] * lognorm.pdf(x, s=sigma2, loc=0, scale=np.exp(mu2)) +
-              weights[2] * lognorm.pdf(x, s=sigma3, loc=0, scale=np.exp(mu3)))
-    return result
-
-def compute_sigma(diff_param, weighting_scheme=None):
-    """
-    Compute the sigma array for weighted least squares based on the specified scheme.
-    
-    Parameters:
-    - diff_param: Normalized differential distribution (y-values).
-    - weighting_scheme: Optional string to specify weighting ('proportional_to_y' for weights ~ y + epsilon, 'sqrt_y' for weights ~ sqrt(y + epsilon), None for unweighted).
-    
-    Returns:
-    - sigma: Array of standard deviations for each data point (or None for unweighted).
-    """
-
-    # Convert diff_param to a numpy array with float dtype to avoid dtype=object issues
-    diff_param = np.asarray(diff_param, dtype=float)
+def gaussian_sum(u, *params):
+    """Sum of Gaussians in u = ln(d).  params = [A1, mu1, s1, A2, mu2, s2, ...]."""
+    u = np.asarray(u, dtype=float)
+    y = np.zeros_like(u)
+    for i in range(0, len(params), 3):
+        A, mu, s = params[i], params[i + 1], params[i + 2]
+        y = y + A * np.exp(-0.5 * ((u - mu) / s) ** 2)
+    return y
 
 
-    sigma = None
-    max_val = np.max(diff_param[diff_param > 0]) if np.any(diff_param > 0) else 1.0
-    if weighting_scheme == 'proportional_to_y':
-        epsilon = 1e-4 * max_val
-        threshold = 1e-3 * max_val  # Adjust as needed to downweight more small values
-        weights = np.where(diff_param > threshold, diff_param + epsilon, 1e-8)
-        weights = np.maximum(weights, 1e-8)  # Simplified safeguard
-        sigma = 1 / np.sqrt(weights)
-        sigma = np.clip(sigma, None, 1e6)
-    elif weighting_scheme == 'sqrt_y':
-        epsilon = 1e-4 * max_val
-        threshold = 1e-3 * max_val  # Same threshold for consistency
-        #print(f'Threshold is is {threshold}')
-        #print(np.sqrt(diff_param + epsilon))
-        weights = np.where(diff_param > threshold, np.sqrt(diff_param + epsilon), 1e-8)
-        #print(f'Weights 1 is {weights}')
-        weights = np.maximum(weights, 1e-8)  # Simplified safeguard
-        #print(f'weights 2 is {weights}')
-        sigma = 1 / np.sqrt(weights)
-        sigma = np.clip(sigma, None, 1e6)
-    return sigma
-
-
-def fit_multimodal_lognorm(diameters_x_data, y_psd_data, num_modes, peak_sizes, fitting_param, weighting_scheme=None):
-    """
-    Fit a multimodal lognormal distribution to the data and compute cumulative distribution.
-    
-    Parameters:
-    - diameters: Array of particle diameters.
-    - diff_param: Normalized differential distribution.
-    - num_modes: Number of modes (1, 2, or 3).
-    - peak_sizes: Diameters at peak locations.
-    - fitting_param: Column name for the differential distribution (e.g., 'Size distribution Volume weighted [%]').
-    - weighting_scheme: Optional string to specify weighting (passed to compute_sigma).
-    
-    Returns:
-    - fit_params: Dictionary of fitted parameters (weights, means, sigmas, R-squared).
-    - fitted_df: DataFrame with 'Particle diameter [µm]', differential, and cumulative columns.
-    - r_squared: R-squared value of the fit.
-    """
-    num_modes = min(num_modes, 3)  # Cap at trimodal
-    modes = peak_sizes[:num_modes]
-    default_sigma = 0.5
-    p0 = []
-    total_height = sum(y_psd_data[np.searchsorted(diameters_x_data, modes)]) if len(modes) > 0 else 1.0
-    initial_weights = []
-    for i, mode in enumerate(modes):
-        if i < num_modes - 1:
-            peak_height = y_psd_data[np.searchsorted(diameters_x_data, mode)] if i < len(modes) else 0
-            weight = peak_height / total_height if total_height > 0 else 1.0 / num_modes
-            weight = max(0, min(weight, 0.99 / max(1, num_modes - 1)))
-            initial_weights.append(weight)
-        mu_init = np.log(mode + 1e-6) + default_sigma**2
-        p0.extend([weight] if i < num_modes - 1 else [])
-        p0.extend([mu_init, default_sigma])
-
-    if num_modes > 1 and initial_weights:
-        weight_sum = sum(initial_weights)
-        if weight_sum > 0.99:
-            initial_weights = [w * 0.99 / weight_sum for w in initial_weights]
-        p0[:num_modes-1] = initial_weights
-
-    if num_modes == 1:
-        fit_func = monomodal_lognorm
-        lower_bounds = [-np.inf, 0]
-        upper_bounds = [np.inf, np.inf]
-    elif num_modes == 2:
-        fit_func = bimodal_lognorm
-        lower_bounds = [0, -np.inf, 0, -np.inf, 0]
-        upper_bounds = [1, np.inf, np.inf, np.inf, np.inf]
+def _point_weights(y, weighting):
+    """Optional curve_fit sigma array. None = unweighted (recommended)."""
+    if weighting is None:
+        return None
+    y = np.asarray(y, dtype=float)
+    ymax = np.max(y) if np.any(y > 0) else 1.0
+    floor = 1e-3 * ymax
+    if weighting == "sqrt_y":          # emphasise low-amplitude modes
+        w = np.sqrt(np.maximum(y, floor))
+    elif weighting == "proportional_to_y":
+        w = np.maximum(y, floor)
     else:
-        fit_func = trimodal_lognorm
-        lower_bounds = [0, 0, -np.inf, 0, -np.inf, 0, -np.inf, 0]
-        upper_bounds = [1, 1, np.inf, np.inf, np.inf, np.inf, np.inf, np.inf]
+        raise ValueError(f"unknown weighting: {weighting!r}")
+    return 1.0 / np.sqrt(w)
 
-    # Compute sigma using the separate weighting function
-    sigma = compute_sigma(y_psd_data, weighting_scheme)
 
+def _mode_statistics(A, mu, sigma, sub_cov, percentiles=(10, 50, 90)):
+    """Analytic lognormal statistics for one Gaussian-in-u mode.
+
+    sub_cov is the 2x2 covariance of (mu, sigma) for this mode, used to
+    propagate the diameter uncertainties. Returns a plain dict.
+    """
+    stats = {
+        "A": A, "mu": mu, "sigma": sigma,
+        "Dg": float(np.exp(mu)),            # geometric mean = median
+        "sigma_g": float(np.exp(sigma)),    # geometric standard deviation
+        "Mean": float(np.exp(mu + sigma ** 2 / 2.0)),
+        "Std": float(np.sqrt(max(np.exp(sigma ** 2) - 1.0, 0.0))
+                     * np.exp(mu + sigma ** 2 / 2.0)),
+        "mu_err": float(np.sqrt(max(sub_cov[0, 0], 0.0))),
+        "sigma_err": float(np.sqrt(max(sub_cov[1, 1], 0.0))),
+    }
+    for p in percentiles:
+        z = ndtri(p / 100.0)
+        Dp = np.exp(mu + sigma * z)
+        # var(ln Dp) = var(mu) + z^2 var(sigma) + 2 z cov(mu, sigma)
+        var_lnDp = (sub_cov[0, 0] + z ** 2 * sub_cov[1, 1]
+                    + 2.0 * z * sub_cov[0, 1])
+        stats[f"D{p}"] = float(Dp)
+        stats[f"D{p}_rel_err"] = float(np.sqrt(max(var_lnDp, 0.0)))  # = dDp/Dp
+    return stats
+
+
+def _mixture_cdf(d, modes):
+    u = np.log(np.asarray(d, dtype=float))
+    c = np.zeros_like(u)
+    for m in modes:
+        z = (u - m["mu"]) / (m["sigma"] * np.sqrt(2.0))
+        c = c + m["weight"] * 0.5 * (1.0 + erf(z))
+    return c
+
+
+def _mixture_percentiles(modes, percentiles=(10, 50, 90)):
+    """Overall D-values of the fitted mixture, by inverting its analytic CDF."""
+    if not modes:
+        return {p: float("nan") for p in percentiles}
+    grid = np.logspace(-2, 3.5, 30000)
+    cdf = _mixture_cdf(grid, modes)
+    return {p: float(np.interp(p / 100.0, cdf, grid)) for p in percentiles}
+
+
+def fit_psd(d, y, num_modes, seeds, weighting=None, default_sigma=0.35,
+            mc_samples=300, rng_seed=0):
+    """
+    Fit `num_modes` Gaussians in u = ln(d) to the distribution (d, y).
+
+    Parameters
+    ----------
+    d, y : array        raw instrument bins (diameter, differential weight).
+    num_modes : int     number of modes to fit (operator-controlled).
+    seeds : array       seed diameters (e.g. detected peaks). Missing seeds are
+                        added in the small-particle region, where the elusive
+                        fine mode usually hides.
+    weighting : str|None  None (unweighted) | 'sqrt_y' | 'proportional_to_y'.
+    mc_samples : int    Monte-Carlo draws for overall D-value CIs (0 disables).
+
+    Returns a dict:
+        modes      : list of per-mode stat dicts (sorted by diameter), each with
+                     weight, Dg, sigma_g, D10/D50/D90 (+ *_rel_err), Mean, Std.
+        overall    : fitted-mixture D10/D50/D90 (+ _ci when mc_samples>0).
+        r_squared  : goodness of fit in log-space.
+        n_modes    : number of valid (in-range) modes returned.
+        dropped    : seed diameters of modes rejected as out-of-range (runaways).
+        u, y_norm, y_fit : arrays for plotting (log-diameter space).
+    """
+    d = np.asarray(d, dtype=float)
+    y = np.asarray(y, dtype=float)
+    order = np.argsort(d)
+    d, y = d[order], y[order]
+    u = np.log(d)
+    u_lo, u_hi = float(u.min()), float(u.max())
+    span = u_hi - u_lo
+
+    # Normalise to unit area in u so amplitudes are comparable between files.
+    area = np.trapezoid(y, u)
+    y_norm = y / area if area > 0 else y
+
+    # Build seed list in log-space; pad missing seeds into the fine-particle end.
+    seeds_u = sorted(float(np.log(s)) for s in np.atleast_1d(seeds) if s > 0)
+    seeds_u = seeds_u[:num_modes]
+    if len(seeds_u) < num_modes:
+        upper = min(seeds_u) if seeds_u else u[int(np.argmax(y_norm))]
+        extra = np.linspace(u_lo, upper, (num_modes - len(seeds_u)) + 2)[1:-1]
+        seeds_u = sorted(seeds_u + list(extra))
+
+    ymax = float(np.max(y_norm))
+    p0, lo, hi = [], [], []
+    for su in seeds_u:
+        p0 += [ymax, su, default_sigma]
+        lo += [0.0, u_lo - 0.25 * span, 1e-2]
+        hi += [np.inf, u_hi + 0.25 * span, max(span, 1e-2)]
+
+    sigma_pts = _point_weights(y_norm, weighting)
     try:
-        params, _ = curve_fit(fit_func, 
-                              diameters_x_data, 
-                              y_psd_data, 
-                              p0=p0, 
-                              bounds=(lower_bounds, upper_bounds), 
-                              maxfev=10000, 
-                              sigma=sigma)
+        popt, pcov = curve_fit(gaussian_sum, u, y_norm, p0=p0, bounds=(lo, hi),
+                               sigma=sigma_pts, absolute_sigma=False, maxfev=20000)
     except RuntimeError:
-        print("Curve fitting failed, using initial guesses")
-        params = p0
+        popt = np.asarray(p0, dtype=float)
+        pcov = np.full((len(p0), len(p0)), np.nan)
 
-    if num_modes == 1:
-        weights = [1.0]
-    else:
-        weights = list(params[:(num_modes-1)]) + [1.0 - sum(params[:(num_modes-1)])]
+    y_fit = gaussian_sum(u, *popt)
+    ss_res = np.sum((y_norm - y_fit) ** 2)
+    ss_tot = np.sum((y_norm - np.mean(y_norm)) ** 2)
+    r_squared = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else 0.0
 
-    fit_params = {}
-    for i in range(num_modes):
-        if num_modes == 1:
-            fit_params[f'Weight{i+1}'] = weights[i]
-            fit_params[f'Mean{i+1}'] = np.exp(params[i*2])
-            fit_params[f'Sigma{i+1}'] = params[i*2 + 1]
-        else:
-            fit_params[f'Weight{i+1}'] = max(0, weights[i])
-            fit_params[f'Mean{i+1}'] = np.exp(params[(num_modes-1) + i*2])
-            fit_params[f'Sigma{i+1}'] = params[(num_modes-1) + i*2 + 1]
+    # Assemble modes; reject any whose centre ran outside the measured range.
+    raw_masses, kept, dropped = [], [], []
+    for i in range(0, len(popt), 3):
+        A, mu, s = popt[i], popt[i + 1], popt[i + 2]
+        if not (u_lo <= mu <= u_hi):
+            dropped.append(float(np.exp(mu)))
+            continue
+        sub_cov = pcov[i + 1:i + 3, i + 1:i + 3] if np.all(np.isfinite(pcov)) \
+            else np.zeros((2, 2))
+        kept.append((A, mu, s, sub_cov))
+        raw_masses.append(A * s * SQRT_2PI)        # area under Gaussian in u
 
-    y_data = y_psd_data
-    fitted_psd = fit_func(diameters_x_data, *params)
+    total_mass = sum(raw_masses) or 1.0
+    modes = []
+    for (A, mu, s, sub_cov), mass in zip(kept, raw_masses):
+        st = _mode_statistics(A, mu, s, sub_cov)
+        st["weight"] = float(mass / total_mass)
+        modes.append(st)
+    modes.sort(key=lambda m: m["Dg"])
 
-    ss_res = np.sum((y_data - fitted_psd) ** 2)
-    ss_tot = np.sum((y_data - np.mean(y_data)) ** 2)
-    r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
-    fit_params['R_squared'] = r_squared
+    overall = _mixture_percentiles(modes)
+    if mc_samples and np.all(np.isfinite(pcov)) and modes:
+        overall_ci = _mc_overall_ci(popt, pcov, u_lo, u_hi, mc_samples, rng_seed)
+        for p in (10, 50, 90):
+            overall[f"D{p}_ci"] = overall_ci[p]
 
-    # Compute cumulative fitted distribution
-    cumulative_fitted = cumulative_trapezoid(fitted_psd, diameters_x_data, initial=0)
-    cumulative_fitted = 100 * cumulative_fitted / cumulative_fitted[-1] if cumulative_fitted[-1] > 0 else cumulative_fitted
-
-    # Create DataFrame for fitted data
-    cum_col = fitting_param.replace('Size distribution', 'Undersize')
-    fitted_df = pd.DataFrame({
-        'Particle diameter  [µm]': diameters_x_data,
-        fitting_param: fitted_psd,
-        cum_col: cumulative_fitted
-    })
-    
-    # Print weights for each component
-    for i in range(num_modes):
-        print(f"Weight of Component {i+1}: {weights[i]*100:.1f}%")
-
-    return fit_params, fitted_df, r_squared
-
-# Monomodal Cumulative distribution function
-def monomodal_lognorm_cdf(x, mu1, sigma1):
-    return lognorm.cdf(x, s=sigma1, loc=0, scale=np.exp(mu1))
-
-# Bimodal Cumulative Distribution Function
-def bimodal_lognorm_cdf(x, w1, mu1, sigma1, mu2, sigma2):
-    weights = [max(0, w1), max(0, 1.0 - w1)]
-    weight_sum = sum(weights)
-    if weight_sum == 0:
-        return np.zeros_like(x, dtype=float)
-    weights = [w / weight_sum for w in weights]
-    result = (weights[0] * lognorm.cdf(x, s=sigma1, loc=0, scale=np.exp(mu1)) +
-              weights[1] * lognorm.cdf(x, s=sigma2, loc=0, scale=np.exp(mu2)))
-    return result * 100  # Scale to [%] to match data
-
-# Trimodal Cumulative Distribution Function
-def trimodal_lognorm_cdf(x, w1, w2, mu1, sigma1, mu2, sigma2, mu3, sigma3):
-    weights = [max(0, w1), max(0, w2), max(0, 1.0 - (w1 + w2))]
-    weight_sum = sum(weights)
-    if weight_sum == 0:
-        return np.zeros_like(x, dtype=float)
-    weights = [w / weight_sum for w in weights]
-    result = (weights[0] * lognorm.cdf(x, s=sigma1, loc=0, scale=np.exp(mu1)) +
-              weights[1] * lognorm.cdf(x, s=sigma2, loc=0, scale=np.exp(mu2)) +
-              weights[2] * lognorm.cdf(x, s=sigma3, loc=0, scale=np.exp(mu3)))
-    return result * 100  # Scale to [%]
+    return {
+        "modes": modes, "overall": overall, "r_squared": r_squared,
+        "n_modes": len(modes), "dropped": dropped,
+        "u": u, "y_norm": y_norm, "y_fit": y_fit,
+    }
 
 
-# Cumulative Distribution Function (CDF) fitting function 
-def fit_multimodal_lognorm_cdf(diameters, data_df, num_modes, peak_sizes, fitting_param, weighting_scheme=None):
-    """
-    Fit a multimodal lognormal distribution to the cumulative data and derive differential.
-    
-    Parameters:
-    - diameters: Array of particle diameters.
-    - data_df: Preprocessed DataFrame containing both differential and cumulative columns.
-    - num_modes: Number of modes (1, 2, or 3).
-    - peak_sizes: Diameters at peak locations.
-    - fitting_param: Column name for the differential distribution (e.g., 'Size distribution Volume weighted [%]').
-    - weighting_scheme: Optional string to specify weighting (passed to compute_sigma).
-    
-    Returns:
-    - fit_params: Dictionary of fitted parameters (weights, means, sigmas, R-squared on cumulative).
-    - fitted_df: DataFrame with 'Particle diameter [µm]', differential (derived), and cumulative columns.
-    - r_squared: R-squared value of the fit (on cumulative).
-    """
-    num_modes = min(num_modes, 3)
-    cum_col = fitting_param.replace('Size distribution', 'Undersize')
-    cum_param = data_df[cum_col].values  # Target: cumulative in [%]
-
-    # Use differential for initial guesses (peaks still useful)
-    diff_param = data_df[fitting_param].values
-    modes = peak_sizes[:num_modes]
-    default_sigma = 0.5
-    p0 = []
-    total_height = sum(diff_param[np.searchsorted(diameters, modes)]) if len(modes) > 0 else 1.0
-    initial_weights = []
-    for i, mode in enumerate(modes):
-        if i < num_modes - 1:
-            peak_height = diff_param[np.searchsorted(diameters, mode)] if i < len(modes) else 0
-            weight = peak_height / total_height if total_height > 0 else 1.0 / num_modes
-            weight = max(0, min(weight, 0.99 / max(1, num_modes - 1)))
-            initial_weights.append(weight)
-        mu_init = np.log(mode + 1e-6) + default_sigma**2
-        p0.extend([weight] if i < num_modes - 1 else [])
-        p0.extend([mu_init, default_sigma])
-
-    if num_modes > 1 and initial_weights:
-        weight_sum = sum(initial_weights)
-        if weight_sum > 0.99:
-            initial_weights = [w * 0.99 / weight_sum for w in initial_weights]
-        p0[:num_modes-1] = initial_weights
-
-    # Select CDF function
-    if num_modes == 1:
-        fit_func = monomodal_lognorm_cdf
-        lower_bounds = [-np.inf, 0]
-        upper_bounds = [np.inf, np.inf]
-    elif num_modes == 2:
-        fit_func = bimodal_lognorm_cdf
-        lower_bounds = [0, -np.inf, 0, -np.inf, 0]
-        upper_bounds = [1, np.inf, np.inf, np.inf, np.inf]
-    else:
-        fit_func = trimodal_lognorm_cdf
-        lower_bounds = [0, 0, -np.inf, 0, -np.inf, 0, -np.inf, 0]
-        upper_bounds = [1, 1, np.inf, np.inf, np.inf, np.inf, np.inf, np.inf]
-
-    # Sigma for weighted fit (normalize cum_param to [0,1] for weighting)
-    sigma = compute_sigma(cum_param / 100, weighting_scheme)
-
-    try:
-        params, _ = curve_fit(fit_func, diameters, cum_param, p0=p0, 
-                              bounds=(lower_bounds, upper_bounds), maxfev=10000, sigma=sigma)
-    except RuntimeError:
-        print("Curve fitting failed, using initial guesses")
-        params = p0
-
-    # Extract params
-    if num_modes == 1:
-        weights = [1.0]
-    else:
-        weights = list(params[:(num_modes-1)]) + [1.0 - sum(params[:(num_modes-1)])]
-
-    fit_params = {}
-    for i in range(num_modes):
-        if num_modes == 1:
-            fit_params[f'Weight{i+1}'] = weights[i]
-            fit_params[f'Mean{i+1}'] = np.exp(params[i*2])
-            fit_params[f'Sigma{i+1}'] = params[i*2 + 1]
-        else:
-            fit_params[f'Weight{i+1}'] = max(0, weights[i])
-            fit_params[f'Mean{i+1}'] = np.exp(params[(num_modes-1) + i*2])
-            fit_params[f'Sigma{i+1}'] = params[(num_modes-1) + i*2 + 1]
-
-    # Compute fitted cumulative and derive differential
-    cumulative_fitted = fit_func(diameters, *params)
-    fitted_psd = np.gradient(cumulative_fitted, diameters) / 100  # Derive PDF (scale back from %)
-
-    # R-squared on cumulative (target)
-    ss_res = np.sum((cum_param - cumulative_fitted) ** 2)
-    ss_tot = np.sum((cum_param - np.mean(cum_param)) ** 2)
-    r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
-    fit_params['R_squared'] = r_squared
-
-    # Fitted DF
-    fitted_df = pd.DataFrame({
-        'Particle diameter  [µm]': diameters,
-        fitting_param: fitted_psd,  # Derived PSD (not yet normalized)
-        cum_col: cumulative_fitted
-    })
-
-    # Normalize derived PSD
-    integral = np.trapezoid(fitted_df[fitting_param], diameters)
-    if integral > 0:
-        fitted_df[fitting_param] /= integral
-
-    # Print weights for each component
-    for i in range(num_modes):
-        print(f"Weight of Component {i+1}: {weights[i]*100:.1f}%")
-
-    return fit_params, fitted_df, r_squared
+def _mc_overall_ci(popt, pcov, u_lo, u_hi, mc_samples, rng_seed):
+    """68% CI on overall D-values by sampling the fit covariance."""
+    rng = np.random.default_rng(rng_seed)
+    draws = rng.multivariate_normal(popt, pcov, size=mc_samples)
+    acc = {10: [], 50: [], 90: []}
+    for params in draws:
+        modes = []
+        masses = []
+        for i in range(0, len(params), 3):
+            A, mu, s = params[i], params[i + 1], params[i + 2]
+            if A <= 0 or s <= 0 or not (u_lo <= mu <= u_hi):
+                continue
+            modes.append({"mu": mu, "sigma": s})
+            masses.append(A * s * SQRT_2PI)
+        if not modes:
+            continue
+        tot = sum(masses) or 1.0
+        for m, mass in zip(modes, masses):
+            m["weight"] = mass / tot
+        q = _mixture_percentiles(modes)
+        for p in (10, 50, 90):
+            acc[p].append(q[p])
+    out = {}
+    for p in (10, 50, 90):
+        vals = np.asarray(acc[p], dtype=float)
+        out[p] = (float(np.percentile(vals, 16)), float(np.percentile(vals, 84))) \
+            if vals.size else (float("nan"), float("nan"))
+    return out
