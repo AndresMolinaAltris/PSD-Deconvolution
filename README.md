@@ -121,6 +121,11 @@ Reproduce the legacy peak-following fit (weight points by their height):
 python main.py --files "sample1.xlsx" --weighting proportional_to_y
 ```
 
+Run without opening plot windows (useful in a terminal or batch):
+```bash
+python main.py --no_plots
+```
+
 Check available options:
 ```bash
 python main.py --help
@@ -128,8 +133,44 @@ python main.py --help
 
 4. **Outputs:**
    - Console: per-file statistics printed as files are processed
-   - `results.xlsx` (in `output_dir`): summary table with D10/D50/D90 and per-mode statistics for all files
-   - Plot windows: fitted distribution and individual modes for each file
+   - `results.xlsx` (in `output_dir`): summary table with measured and fitted D10/D50/D90 and per-mode statistics for all files
+   - Plot windows: fitted distribution and individual modes for each file (suppress with `--no_plots`)
+
+## Batch report
+
+`batch_report.py` fits every `.xlsx` in `data_dir` and builds a single, clear report —
+a figure grid (one fitted panel per sample), a summary table, and an HTML page tying
+them together. Failing files are skipped and listed, never aborting the batch.
+
+```bash
+python batch_report.py                 # Volume weighted (config default)
+python batch_report.py --param_fit 0   # Surface weighted
+```
+
+Each weighting writes to its own folder so reports don't overwrite each other:
+`report_volume/`, `report_surface/`, `report_number/`. Open the HTML to view:
+
+```bash
+start report_volume/PSD_Report.html    # Windows
+```
+
+The report folders are git-ignored (regenerate them any time from the data).
+
+## Testing
+
+A sanity check runs seed detection and a fit on every bundled `Data_Test` file and
+asserts that lowering the prominence never finds fewer peaks and that **no fitted mode
+lands outside the measured diameter range** (the guard against runaway fits):
+
+```bash
+python test_peak_detection.py
+```
+
+It ends with `All assertions passed.` when the pipeline is healthy.
+
+> **Windows note:** if a command ever raises `UnicodeEncodeError` on a plain console,
+> prefix it with `$env:PYTHONIOENCODING='utf-8'; ` (PowerShell). The default console
+> output is ASCII-safe, so this is only needed for non-default locales.
 
 ## Controlling the fit
 
