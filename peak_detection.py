@@ -86,10 +86,6 @@ def prepare_distribution_data_interpolation(data_df, fitting_param, interp_point
         raise ValueError("Diameters must be positive for log-spacing.")
     diameters = np.logspace(np.log10(min_d), np.log10(max_d), interp_points)
     
-    # Interpolate using linear interpolation to avoid oscillations/artifacts
-    #interpolator = interp1d(original_diameters, original_diff_param, kind='linear', fill_value=0, bounds_error=False)
-    #diff_param = interpolator(diameters)
-    
     # Interpolate using cubic interpolation for smoother results (change to 'linear' if preferred)
     interpolator = interp1d(original_diameters, original_diff_param, kind='cubic', fill_value=0, bounds_error=False)
     diff_param = interpolator(diameters)
@@ -103,13 +99,6 @@ def prepare_distribution_data_interpolation(data_df, fitting_param, interp_point
         raise ValueError("Interpolated distribution integrates to zero.")
     diff_param = diff_param / integral
 
-
-    # Normalize original for comparison
-    original_integral = np.trapezoid(original_diff_param, original_diameters)
-    if original_integral == 0:
-        raise ValueError("Original distribution integrates to zero.")
-    original_normalized = original_diff_param / original_integral
-    
     return diameters, diff_param
 
 def find_distribution_peaks(diameters, diff_param,

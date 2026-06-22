@@ -64,37 +64,17 @@ def compute_percentiles(diameters, cum_weights, percentiles=[10, 50, 90]):
     Returns:
     - List of diameters corresponding to the specified percentiles.
     """
-    interp_func = interp1d(cum_weights, diameters, bounds_error=False, fill_value=(diameters.min(), diameters.max()))
+    diameters = np.asarray(diameters, dtype=float)
+    cum_weights = np.asarray(cum_weights, dtype=float)
+    # Surface/number-weighted cumulatives often contain flat plateaus (repeated
+    # undersize values where the distribution is ~0). Those duplicate x-values
+    # make interp1d divide by zero. Collapse them to the first (smallest)
+    # diameter that reaches each cumulative level, giving a strictly increasing
+    # axis to invert. For data with no duplicates this is a no-op.
+    unique_cum, first_idx = np.unique(cum_weights, return_index=True)
+    interp_func = interp1d(unique_cum, diameters[first_idx], bounds_error=False,
+                           fill_value=(diameters.min(), diameters.max()))
     return [float(interp_func(p)) for p in percentiles]
-
-# def load_data(filename, preprocess=False, param_fit=None):
-#     """
-#     Load and optionally preprocess Excel data.
-    
-#     Parameters:
-#     - filename: Path to the Excel file or directory.
-#     - preprocess: If True, preprocess the data (sort, clean, etc.).
-#     - param_fit: Column name for the fitting parameter (used in preprocessing).
-    
-#     Returns:
-#     - If filename is a directory, returns a list of Excel file paths.
-#     - If filename is a file and preprocess=False, returns raw DataFrame.
-#     - If preprocess=True, returns preprocessed DataFrame.
-#     """
-#     if isinstance(filename, str) and os.path.isdir(filename):
-#         return find_xlsx_files(filename)
-    
-#     headers = pd.read_excel(filename, usecols="F:V", nrows=3, skiprows=4)
-#     new_cols = headers.astype(str).apply(lambda x: ' '.join(x), axis=0)
-#     data_df = pd.read_excel(filename, usecols="F:V", skiprows=5, decimal=".")
-#     data_df.columns = new_cols
-#     data_df.columns = data_df.columns.str.replace("nan", "", regex=False).str.strip()
-    
-#     if preprocess:
-#         data_df = data_df.drop(index=[0,1]).reset_index(drop=True)
-#         data_df = data_df.sort_values('Particle diameter  [µm]')
-#         data_df = data_df.dropna(subset=['Particle diameter  [µm]', param_fit.replace('Size distribution', 'Undersize'), param_fit])
-#     return data_df
 
 def load_data(filename, preprocess=False, param_fit=None, min_diameter=None):
     """
@@ -141,13 +121,11 @@ def compute_basic_statistics(data_df, weightings):
     - Dictionary with statistics for each weighting.
     """
     results = {}
-    #for weight in weightings:
     cum_col = f'Undersize {weightings} [%]'
     diff_col = f'Size distribution {weightings} [%]'
     d10, d50, d90 = compute_percentiles(data_df['Particle diameter  [µm]'], data_df[cum_col])
     mean = np.average(data_df['Particle diameter  [µm]'], weights=data_df[diff_col])
     std = np.sqrt(np.average((data_df['Particle diameter  [µm]'] - mean)**2, weights=data_df[diff_col]))
     results[weightings] = {'D10': d10, 'D50': d50, 'D90': d90, 'Mean': mean, 'Std': std}
-    
+
     return results
-    #return results

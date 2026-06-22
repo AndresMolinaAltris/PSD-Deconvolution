@@ -4,6 +4,7 @@ config.json
 # Generated output
 *.xlsx
 *.csv
+report_*/
 
 # Data folders
 Data_Test/
