@@ -94,7 +94,7 @@ def analyse_file(path, swd, parameter, args, weighting):
         res[f"Mode{i}_Mean"] = round(m["Mean"], 3)
         res[f"Mode{i}_Std"] = round(m["Std"], 3)
         print(f"    Mode {i}: weight {m['weight']*100:5.1f}%  Dg={m['Dg']:7.2f} µm  "
-              f"σg={m['sigma_g']:.2f}  D50={m['D50']:.2f}±{m['D50_rel_err']*100:.1f}%")
+              f"sigma_g={m['sigma_g']:.2f}  D50={m['D50']:.2f}+/-{m['D50_rel_err']*100:.1f}%")
 
     if not args.no_plots:
         plot_individual_modes(fit, swd)
